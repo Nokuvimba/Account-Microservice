@@ -6,3 +6,4 @@ requirements.txt
 *.db
 .pytest_cache/
 .coverage
+

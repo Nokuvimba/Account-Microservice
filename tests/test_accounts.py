@@ -51,3 +51,61 @@ def test_health_check_200(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
+    
+def test_update_account(client):
+    # Create an account first
+    create_data = {
+        "account_number": "UP1111",
+        "account_name": "Before Update",
+        "opening_balance": "100.00"
+    }
+    create_resp = client.post("/accounts", json=create_data)
+    account_id = create_resp.json()["id"]
+
+    # Update the account
+    update_data = {
+        "account_number": "UP1111",
+        "account_name": "After Update",
+        "opening_balance": "200.00"
+    }
+    response = client.put(f"/accounts/{account_id}", json=update_data)
+    assert response.status_code == 200
+    assert response.json()["account_name"] == "After Update"
+    assert response.json()["balance"] == "200.00"
+
+
+def test_update_account_not_found(client):
+    update_data = {
+        "account_number": "XX9999",
+        "account_name": "Ghost Account",
+        "opening_balance": "0.00"
+    }
+    response = client.put("/accounts/9999", json=update_data)
+    assert response.status_code == 404
+
+
+def test_delete_account(client):
+    # Create account to delete
+    create_data = {
+        "account_number": "DD1111",
+        "account_name": "To Delete",
+        "opening_balance": "50.00"
+    }
+    create_resp = client.post("/accounts", json=create_data)
+    account_id = create_resp.json()["id"]
+
+    # Delete it
+    response = client.delete(f"/accounts/{account_id}")
+    assert response.status_code == 200
+    assert response.json()["message"] == "Account deleted successfully."
+
+    # Verify deleted
+    check = client.get(f"/accounts/{account_id}")
+    assert check.status_code == 404
+
+
+def test_delete_account_not_found(client):
+    response = client.delete("/accounts/9999")
+    assert response.status_code == 404
+    
+    
