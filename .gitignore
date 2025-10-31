@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 venv
 requirements.txt
+*.db
+.pytest_cache/
+.coverage
