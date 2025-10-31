@@ -1,68 +1,44 @@
-from fastapi import FastAPI, HTTPException, status
-from datetime import datetime
-from typing import List
-from .schemas import Customer 
+from fastapi import FastAPI, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+from decimal import Decimal
 
+from app.database import engine, get_db
+from app.models import Base, AccountDB
+from app.schemas import AccountCreate, AccountRead
 
-app = FastAPI(title="Banking App • Customer Login Microservice")
+# Initialize FastAPI app and create database tables
+app = FastAPI()
+# Create database tables
+Base.metadata.create_all(bind=engine)
 
-# In-memory list to store customer data
-customers: List[Customer] = []
+# Health check endpoint
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
-#to check if the server is running
-@app.get("/hello")
-def hello():
-    return {"message": "Customer Login service running"}
+# Endpoint to create a new account
+@app.post("/accounts", response_model=AccountRead, status_code=status.HTTP_201_CREATED)
+def create_account(payload: AccountCreate, db: Session = Depends(get_db)): 
+    row = AccountDB(
+        account_number=payload.account_number,
+        account_name=payload.account_name,
+        balance=payload.opening_balance or Decimal("0.00"),
+        currency="EUR",
+    )
+    try: # Try to add the new account to the database
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    except IntegrityError: # Handle unique constraint violation
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Account number already exists.")
+    return row
 
-# GET ALL CUSTOMERS 
-@app.get("/api/customers")
-def list_customers():
-    return customers
-
-# GET CUSTOMER BY ID
-@app.get("/api/customers/{customer_id}")
-def get_customer(customer_id: int):
-    for c in customers:
-        if c.customer_id == customer_id:
-            return c
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
-
-# CREATE CUSTOMER
-@app.post("/api/customers", status_code=status.HTTP_201_CREATED)
-def register_customer(customer: Customer):
-     # Check if the customer_id already exists
-    if any(c.customer_id == customer.customer_id for c in customers):   
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="customer_id already exists")
-        
-    # Check if the email address is already registered
-    if any(c.email == customer.email for c in customers):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email already registered")
-
-   # Add the new customer to the in-memory list
-    customers.append(customer)
-    return customer  # Return the created customer (including password)
-
-
-# UPDATE CUSTOMER
-@app.put("/api/customers/{customer_id}", status_code=status.HTTP_202_ACCEPTED)
-def update_customer(customer_id: int, updated: Customer):
-    updated.customer_id = customer_id # making sure that path ID and body ID are the same
-
-      # Search for the customer by ID and replace their details
-    for i, c in enumerate(customers):
-        if c.customer_id == customer_id:
-            customers[i] = updated # Update the customer
-            return updated
-
-       # If not found, return an error       
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="customer_id not found")
-
-# DELETE CUSTOMER
-@app.delete("/api/customers/{customer_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_customer(customer_id: int):
-    for i, c in enumerate(customers):
-        if c.customer_id == customer_id:
-            customers.pop(i) # Remove the customer from the list
-            return
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Customer not found")
-
+# Endpoint to retrieve account details by account ID
+@app.get("/accounts/{account_id}", response_model=AccountRead)
+def get_account(account_id: int, db: Session = Depends(get_db)):
+    row = db.get(AccountDB, account_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Account not found.")
+    return row
