@@ -1,21 +1,17 @@
-import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from app.models import Base
 
-# Configure the database URL (default to SQLite for development)
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./dev.db")
+# Dev: SQLite file. Switching to Postgres later.
+SQLALCHEMY_DATABASE_URL = "sqlite:///./dev.db"
 
-# Create the SQLAlchemy engine and session factory
 engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
+    SQLALCHEMY_DATABASE_URL,
+    connect_args={"check_same_thread": False},  # needed for SQLite + FastAPI
 )
-SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine) 
 
-# Dependency to get a database session
 def get_db():
-    db = SessionLocal()
+    db = SessionLocal() # create a new session
     try:
         yield db
     finally:
