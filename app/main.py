@@ -1,6 +1,9 @@
+# app/main.py
 from decimal import Decimal, ROUND_HALF_UP
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -12,8 +15,27 @@ from app.schemas import (
     TransactionRead,
 )
 
-app = FastAPI(title="Account Microservice", version="1.0.0")
-Base.metadata.create_all(bind=engine)
+# Lifespan replaces @app.on_event("startup")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Make sure tables exist on startup (once).
+    Base.metadata.create_all(bind=engine)
+    yield
+
+# Create the app with lifespan hook
+app = FastAPI(
+    title="Account Microservice",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# CORS – dev-friendly; tighten `allow_origins` in prod
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------- helpers ----------
 def money(x: Decimal) -> Decimal:
