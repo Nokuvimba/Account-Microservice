@@ -14,6 +14,7 @@ from app.schemas import (
     DepositCreate, WithdrawCreate, TransferCreate,
     TransactionRead,
 )
+from app.publisher import publish_transaction_event
 
 # Lifespan replaces @app.on_event("startup")
 @asynccontextmanager
@@ -131,7 +132,19 @@ def deposit(account_number: str, data: DepositCreate, db: Session = Depends(get_
         receiver_account_number=receiver.account_number,
         receiver_name=receiver.account_name,
     )
-    db.add(tx); db.commit(); db.refresh(tx); return tx
+    db.add(tx)
+    db.commit()
+    db.refresh(tx)
+
+    publish_transaction_event(
+        event_type="deposit",
+        transaction_id=tx.id,
+        account_id=receiver.id,
+        account_number=receiver.account_number,
+        account_name=receiver.account_name,
+        amount=amt,
+    ) 
+    return tx
 
 @app.post("/accounts/by-number/{account_number}/withdraw",
           response_model=TransactionRead, status_code=status.HTTP_201_CREATED)
@@ -154,13 +167,27 @@ def withdraw(account_number: str, data: WithdrawCreate, db: Session = Depends(ge
         sender_name=sender.account_name,
         receiver_name="ATM/External",
     )
-    db.add(tx); db.commit(); db.refresh(tx); return tx
+    db.add(tx)
+    db.commit()
+    db.refresh(tx)
+
+    publish_transaction_event(
+        event_type="withdrawal",
+        transaction_id=tx.id,
+        account_id=sender.id,
+        account_number=sender.account_number,
+        account_name=sender.account_name,
+        amount=amt,
+    )
+
+    return tx
 
 @app.post("/accounts/by-number/{account_number}/transfer",
           response_model=list[TransactionRead], status_code=status.HTTP_201_CREATED)
 def transfer(account_number: str, data: TransferCreate, db: Session = Depends(get_db)):
     sender = get_by_number(db, account_number)
     receiver = get_by_number(db, data.to_account_number)
+
     if sender.id == receiver.id:
         raise HTTPException(status_code=400, detail="Cannot transfer to the same account.")
 
@@ -172,18 +199,60 @@ def transfer(account_number: str, data: TransferCreate, db: Session = Depends(ge
     receiver.balance = money(Decimal(receiver.balance) + amt)
 
     out_tx = TransactionDB(
-        account_id=sender.id, tx_type="transfer_out", amount=amt,
+        account_id=sender.id,
+        tx_type="transfer_out",
+        amount=amt,
         description=data.description,
-        sender_account_id=sender.id, sender_account_number=sender.account_number, sender_name=sender.account_name,
-        receiver_account_id=receiver.id, receiver_account_number=receiver.account_number, receiver_name=receiver.account_name,
+        sender_account_id=sender.id,
+        sender_account_number=sender.account_number,
+        sender_name=sender.account_name,
+        receiver_account_id=receiver.id,
+        receiver_account_number=receiver.account_number,
+        receiver_name=receiver.account_name,
     )
+
     in_tx = TransactionDB(
-        account_id=receiver.id, tx_type="transfer_in", amount=amt,
+        account_id=receiver.id,
+        tx_type="transfer_in",
+        amount=amt,
         description=data.description or f"From {sender.account_name}",
-        sender_account_id=sender.id, sender_account_number=sender.account_number, sender_name=sender.account_name,
-        receiver_account_id=receiver.id, receiver_account_number=receiver.account_number, receiver_name=receiver.account_name,
+        sender_account_id=sender.id,
+        sender_account_number=sender.account_number,
+        sender_name=sender.account_name,
+        receiver_account_id=receiver.id,
+        receiver_account_number=receiver.account_number,
+        receiver_name=receiver.account_name,
     )
-    db.add_all([out_tx, in_tx]); db.commit(); db.refresh(out_tx); db.refresh(in_tx)
+
+    db.add_all([out_tx, in_tx])
+    db.commit()
+    db.refresh(out_tx)
+    db.refresh(in_tx)
+
+    # Event for sender (money leaving)
+    publish_transaction_event(
+        event_type="transfer_out",
+        transaction_id=out_tx.id,
+        account_id=sender.id,
+        account_number=sender.account_number,
+        account_name=sender.account_name,
+        counterparty_account_number=receiver.account_number,
+        counterparty_name=receiver.account_name,
+        amount=amt,
+    )
+
+    # Event for receiver (money arriving)
+    publish_transaction_event(
+        event_type="transfer_in",
+        transaction_id=in_tx.id,
+        account_id=receiver.id,
+        account_number=receiver.account_number,
+        account_name=receiver.account_name,
+        counterparty_account_number=sender.account_number,
+        counterparty_name=sender.account_name,
+        amount=amt,
+    )
+
     return [out_tx, in_tx]
 
 @app.get("/accounts/by-number/{account_number}/transactions", response_model=list[TransactionRead])
