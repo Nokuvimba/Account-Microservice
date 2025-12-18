@@ -14,3 +14,10 @@ docker-build:
 
 docker-down:
 	docker compose down	
+
+exportLogin:
+	export LOGIN_BASE_URL=http://localhost:8000
+
+runAccount:
+	python -m uvicorn app.main:app --reload --port 8002
+
