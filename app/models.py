@@ -15,6 +15,8 @@ class AccountDB(Base):
     __tablename__ = "accounts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, unique=True, index=True, nullable=False)
+    # ^ store the Login service user ID (don’t FK across DBs; just an int)
     account_number: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
     account_name: Mapped[str] = mapped_column(String(128), nullable=False)
     balance: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=0, nullable=False)
@@ -58,3 +60,5 @@ class TransactionDB(Base):
     receiver_account: Mapped["AccountDB"] = relationship("AccountDB", foreign_keys=[receiver_account_id], viewonly=True)
 
     __table_args__ = (Index("ix_tx_account_id_created", "account_id", "created_at", "id"),)
+    
+

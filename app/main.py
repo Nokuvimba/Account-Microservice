@@ -1,7 +1,13 @@
 # app/main.py
+import os
+import time
+import random
+import string
 from decimal import Decimal, ROUND_HALF_UP
 from contextlib import asynccontextmanager
+from typing import Any
 
+import httpx
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import IntegrityError
@@ -10,26 +16,27 @@ from sqlalchemy.orm import Session
 from app.database import engine, get_db
 from app.models import Base, AccountDB, TransactionDB
 from app.schemas import (
-    AccountCreate, AccountRead,
+    AccountRead,
     DepositCreate, WithdrawCreate, TransferCreate,
     TransactionRead,
 )
 
-# Lifespan replaces @app.on_event("startup")
+# -------------------------
+# Service-to-service config
+# -------------------------
+
+# Lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Make sure tables exist on startup (once).
     Base.metadata.create_all(bind=engine)
     yield
 
-# Create the app with lifespan hook
 app = FastAPI(
     title="Account Microservice",
     version="1.0.0",
     lifespan=lifespan,
 )
 
-# CORS – dev-friendly; tighten `allow_origins` in prod
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,7 +44,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+LOGIN_BASE_URL = os.getenv("LOGIN_BASE_URL", "http://localhost:8000")
 # ---------- helpers ----------
+def fetch_user_from_login(user_id: int) -> dict[str, Any]:
+    url = f"{LOGIN_BASE_URL}/api/users/{user_id}"
+    print("Calling Login URL:", url)
+
+    try:
+        with httpx.Client() as client:
+            r = client.get(url, timeout=5.0)
+
+        if r.status_code == 404:
+            raise HTTPException(status_code=404, detail="User not found in Signup/User service.")
+
+        r.raise_for_status()
+        return r.json()
+
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Signup/User service unavailable.")
+    except httpx.HTTPStatusError:
+        raise HTTPException(status_code=502, detail="Signup/User service returned an error.")
+    
 def money(x: Decimal) -> Decimal:
     return Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
@@ -47,71 +74,90 @@ def get_by_number(db: Session, account_number: str) -> AccountDB:
         raise HTTPException(status_code=404, detail="Account number not found.")
     return row
 
+def get_by_user_id(db: Session, user_id: int) -> AccountDB:
+    row = db.query(AccountDB).filter(AccountDB.user_id == user_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Account for this user not found.")
+    return row
+
+def generate_account_number() -> str:
+    letters = "".join(random.choice(string.ascii_uppercase) for _ in range(2))
+    digits = random.randint(0, 9999)
+    return f"{letters}{digits:04d}"
+
+
 # ---------- health ----------
 @app.get("/health")
-def health(): return {"status": "ok"}
+def health():
+    return {"status": "ok"}
 
-# ---------- accounts ----------
-#creating an account
-@app.post("/accounts", response_model=AccountRead, status_code=status.HTTP_201_CREATED)
-def create_account(payload: AccountCreate, db: Session = Depends(get_db)):
+@app.get("/api/proxy-user/{user_id}")
+def proxy_user(user_id: int):
+    user = fetch_user_from_login(user_id)
+    return {"account_service": True, "login_user": user}
+
+
+# ---------- accounts (ONLY from user_id) ----------
+
+@app.post("/accounts/from-user/{user_id}", response_model=AccountRead, status_code=status.HTTP_201_CREATED)
+def create_account_from_user(user_id: int, db: Session = Depends(get_db)):
+    # 1) confirm user exists + grab their details
+    user = fetch_user_from_login(user_id)
+
+    # 2) prevent duplicates (one user -> one account)
+    existing = db.query(AccountDB).filter(AccountDB.user_id == user_id).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Account already exists for this user.")
+
+    # 3) create account (account_name derived from user full_name)
     row = AccountDB(
-        account_number=payload.account_number,
-        account_name=payload.account_name,
-        balance=payload.opening_balance or Decimal("0.00"),
+        user_id=user_id,
+        account_number=generate_account_number(),
+        account_name=user.get("full_name", f"User {user_id}"),
+        balance=Decimal("0.00"),
         currency="EUR",
     )
     try:
-        db.add(row); db.commit(); db.refresh(row); return row
-    except IntegrityError:
-        db.rollback(); raise HTTPException(status_code=409, detail="Account number already exists.")
-
-@app.get("/accounts", response_model=list[AccountRead])
-def list_accounts(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
-    limit = max(1, min(limit, 200))
-    return (
-        db.query(AccountDB)
-        .order_by(AccountDB.created_at, AccountDB.id)
-        .offset(offset).limit(limit).all()
-    )
-
-@app.get("/accounts/by-number/{account_number}", response_model=AccountRead)
-def get_account_by_number(account_number: str, db: Session = Depends(get_db)):
-    return get_by_number(db, account_number)
-
-@app.get("/accounts/{account_id}", response_model=AccountRead)
-def get_account_by_id(account_id: int, db: Session = Depends(get_db)):
-    row = db.query(AccountDB).filter(AccountDB.id == account_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Account not found.")
-    return row
-
-@app.put("/accounts/{account_id}", response_model=AccountRead)
-def update_account(account_id: int, data: AccountCreate, db: Session = Depends(get_db)):
-    row = db.query(AccountDB).filter(AccountDB.id == account_id).first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Account not found.")
-    row.account_name = data.account_name
-    row.account_number = data.account_number
-    row.balance = data.opening_balance or row.balance
-    try:
-        db.commit()
-        db.refresh(row)
+        db.add(row); db.commit(); db.refresh(row)
         return row
     except IntegrityError:
         db.rollback()
-        raise HTTPException(status_code=409, detail="Account number already exists.")
+        raise HTTPException(status_code=409, detail="Could not create account (conflict).")
 
-@app.delete("/accounts/{account_id}")
-def delete_account(account_id: int, db: Session = Depends(get_db)):
-    row = db.query(AccountDB).filter(AccountDB.id == account_id).first()
+@app.get("/accounts/by-user/{user_id}", response_model=AccountRead)
+def get_account_by_user(user_id: int, db: Session = Depends(get_db)):
+    return get_by_user_id(db, user_id)
+
+@app.get("/accounts/by-user/{user_id}/details")
+def get_account_details(user_id: int, db: Session = Depends(get_db)):
+    acct = get_by_user_id(db, user_id)
+    user = fetch_user_from_login(user_id)
+
+    return {
+        "account": {
+            "id": acct.id,
+            "user_id": acct.user_id,
+            "account_number": acct.account_number,
+            "account_name": acct.account_name,
+            "balance": str(acct.balance),
+            "currency": acct.currency,
+            "created_at": acct.created_at,
+        },
+        "user": user,
+    }
+
+@app.delete("/accounts/by-user/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_account_by_user(user_id: int, db: Session = Depends(get_db)):
+    row = db.query(AccountDB).filter(AccountDB.user_id == user_id).first()
     if not row:
-        raise HTTPException(status_code=404, detail="Account not found.")
+        # idempotent (nice for service-to-service deletes)
+        return
     db.delete(row)
     db.commit()
-    return {"message": "Account deleted successfully."}
+    return
 
-# ---------- transactions ----------
+# ---------- transactions (KEEP as-is) ----------
+
 @app.post("/accounts/by-number/{account_number}/deposit",
           response_model=TransactionRead, status_code=status.HTTP_201_CREATED)
 def deposit(account_number: str, data: DepositCreate, db: Session = Depends(get_db)):
@@ -195,7 +241,7 @@ def list_transactions_for_number(account_number: str, db: Session = Depends(get_
         .order_by(TransactionDB.created_at.desc(), TransactionDB.id.desc())
         .all()
     )
-    
+
 @app.get("/transactions", response_model=list[TransactionRead])
 def list_transactions(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
     limit = max(1, min(limit, 200))
@@ -204,3 +250,4 @@ def list_transactions(limit: int = 50, offset: int = 0, db: Session = Depends(ge
         .order_by(TransactionDB.created_at.desc(), TransactionDB.id.desc())
         .offset(offset).limit(limit).all()
     )
+
