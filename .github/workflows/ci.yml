@@ -1,22 +1,35 @@
-name: Build & Push Image
-
+name: CI
 on:
   push:
     branches: [master]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
-
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Tests (pytest + coverage)
+        run: pytest --cov=app --cov-report=term-missing
+
   docker:
     runs-on: ubuntu-latest
+    
     permissions:
       contents: read
       packages: write
-
+      
     steps:
       - uses: actions/checkout@v4
 
       - name: Set image name
-      # IMAGE becomes: ghcr.io/<owner>/<repo>/login
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/account" >> $GITHUB_ENV
 
       - name: Login to GHCR
