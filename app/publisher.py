@@ -52,4 +52,4 @@ def publish_transaction_event(
         "timestamp": datetime.utcnow().isoformat(),
     }
 
-    asyncio.create_task(publish_event(payload))
+    asyncio.run(publish_event(payload))
