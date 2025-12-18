@@ -10,14 +10,12 @@ AccountNumber = Annotated[str, Field(pattern=r"^[A-Z]{2}\d{4}$", examples=["TA12
 Money = condecimal(max_digits=18, decimal_places=2)
 
 # ---- accounts ----
-class AccountCreate(BaseModel):
-    account_number: AccountNumber
-    account_name: str
-    opening_balance: Money | None = Decimal("0.00")
 
 class AccountRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+    
     id: int
+    user_id: int 
     account_number: AccountNumber
     account_name: str
     balance: Money
@@ -40,6 +38,7 @@ class TransferCreate(BaseModel):
 
 class TransactionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+    
     id: int
     account_id: int
     tx_type: Literal["deposit", "withdrawal", "transfer_out", "transfer_in"]
