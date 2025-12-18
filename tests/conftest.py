@@ -1,6 +1,7 @@
 # tests/conftest.py
 
 import pytest
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from sqlalchemy import create_engine, event
@@ -48,3 +49,21 @@ def client():
         yield c
 
     app.dependency_overrides.clear()
+
+@pytest.fixture
+def mock_login_service():
+    """Mock the external login service calls"""
+    def mock_fetch_user(user_id: int):
+        return {
+            "id": user_id,
+            "full_name": f"Test User {user_id}",
+            "email": f"user{user_id}@example.com"
+        }
+    
+    def mock_publish_event(*args, **kwargs):
+        # Mock publisher - do nothing during tests
+        pass
+    
+    with patch('app.main.fetch_user_from_login', side_effect=mock_fetch_user), \
+         patch('app.main.publish_transaction_event', side_effect=mock_publish_event):
+        yield
