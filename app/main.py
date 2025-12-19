@@ -13,7 +13,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from pybreaker import CircuitBreakerError
+
 from app.database import engine, get_db
+from app.circuit import login_cb
 from app.models import Base, AccountDB, TransactionDB
 from app.schemas import (
     AccountRead,
@@ -47,24 +50,61 @@ app.add_middleware(
 
 LOGIN_BASE_URL = os.getenv("LOGIN_BASE_URL", "http://localhost:8000")
 # ---------- helpers ----------
+@login_cb
 def fetch_user_from_login(user_id: int) -> dict[str, Any]:
     url = f"{LOGIN_BASE_URL}/api/users/{user_id}"
-    print("Calling Login URL:", url)
 
+    with httpx.Client() as client:
+        r = client.get(url, timeout=5.0)
+
+    if r.status_code == 404:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    r.raise_for_status()
+    return r.json()
+
+def safe_fetch_user_from_login(user_id: int) -> dict[str, Any]:
     try:
-        with httpx.Client() as client:
-            r = client.get(url, timeout=5.0)
+        return fetch_user_from_login(user_id)
 
-        if r.status_code == 404:
-            raise HTTPException(status_code=404, detail="User not found in Signup/User service.")
-
-        r.raise_for_status()
-        return r.json()
+    except CircuitBreakerError:
+        raise HTTPException(
+            status_code=503,
+            detail="Login service temporarily unavailable (circuit open)."
+        )
 
     except httpx.RequestError:
-        raise HTTPException(status_code=503, detail="Signup/User service unavailable.")
+        raise HTTPException(
+            status_code=503,
+            detail="Signup/User service unavailable."
+        )
+
     except httpx.HTTPStatusError:
-        raise HTTPException(status_code=502, detail="Signup/User service returned an error.")
+        raise HTTPException(
+            status_code=502,
+            detail="Signup/User service returned an error."
+        )
+
+# def fetch_user_from_login(user_id: int) -> dict[str, Any]:
+#     url = f"{LOGIN_BASE_URL}/api/users/{user_id}"
+#     print("Calling Login URL:", url)
+
+#     try:
+#         with httpx.Client() as client:
+#             r = client.get(url, timeout=5.0)
+
+#         if r.status_code == 404:
+#             raise HTTPException(status_code=404, detail="User not found in Signup/User service.")
+
+#         r.raise_for_status()
+#         return r.json()
+        
+#     except CircuitBreakerError:
+#         raise HTTPException(status_code=503, detail="Login service temporarily unavailable (circuit open).")
+#     except httpx.RequestError:
+#         raise HTTPException(status_code=503, detail="Signup/User service unavailable.")
+#     except httpx.HTTPStatusError:
+#         raise HTTPException(status_code=502, detail="Signup/User service returned an error.")
     
 def money(x: Decimal) -> Decimal:
     return Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -94,7 +134,7 @@ def health():
 
 @app.get("/api/proxy-user/{user_id}")
 def proxy_user(user_id: int):
-    user = fetch_user_from_login(user_id)
+    user = safe_fetch_user_from_login(user_id)
     return {"account_service": True, "login_user": user}
 
 
@@ -103,7 +143,7 @@ def proxy_user(user_id: int):
 @app.post("/accounts/from-user/{user_id}", response_model=AccountRead, status_code=status.HTTP_201_CREATED)
 def create_account_from_user(user_id: int, db: Session = Depends(get_db)):
     # 1) confirm user exists + grab their details
-    user = fetch_user_from_login(user_id)
+    user = safe_fetch_user_from_login(user_id)
 
     # 2) prevent duplicates (one user -> one account)
     existing = db.query(AccountDB).filter(AccountDB.user_id == user_id).first()
@@ -132,7 +172,7 @@ def get_account_by_user(user_id: int, db: Session = Depends(get_db)):
 @app.get("/accounts/by-user/{user_id}/details")
 def get_account_details(user_id: int, db: Session = Depends(get_db)):
     acct = get_by_user_id(db, user_id)
-    user = fetch_user_from_login(user_id)
+    user = safe_fetch_user_from_login(user_id)
 
     return {
         "account": {
