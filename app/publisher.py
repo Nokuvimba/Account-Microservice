@@ -45,11 +45,16 @@ def publish_transaction_event(
         "account_id": account_id,
         "account_number": account_number,
         "account_name": account_name,
-        "counterparty_account_number": counterparty_account_number,
-        "counterparty_name": counterparty_name,
+        # "counterparty_account_number": counterparty_account_number,
+        # "counterparty_name": counterparty_name,
         "amount": float(amount),
         "currency": "EUR",
         "timestamp": datetime.utcnow().isoformat(),
     }
+    if counterparty_account_number:
+    payload["counterparty_account_number"] = counterparty_account_number
+
+    if counterparty_name:
+        payload["counterparty_name"] = counterparty_name
 
     asyncio.run(publish_event(payload))
