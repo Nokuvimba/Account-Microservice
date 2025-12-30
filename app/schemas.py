@@ -21,6 +21,7 @@ class AccountRead(BaseModel):
     balance: Money
     currency: str = "EUR"
     created_at: datetime
+    is_active: bool = True
 
 # ---- transactions ----
 class DepositCreate(BaseModel):

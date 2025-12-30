@@ -1,6 +1,5 @@
 # app/main.py
 import os
-import time
 import random
 import string
 from decimal import Decimal, ROUND_HALF_UP
@@ -25,15 +24,13 @@ from app.schemas import (
 )
 from app.publisher import publish_transaction_event
 
-# -------------------------
 # Service-to-service config
-# -------------------------
 
-# Lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     yield
+
 
 app = FastAPI(
     title="Account Microservice",
@@ -49,6 +46,7 @@ app.add_middleware(
 )
 
 LOGIN_BASE_URL = os.getenv("LOGIN_BASE_URL", "http://localhost:8000")
+
 # ---------- helpers ----------
 @login_cb
 def fetch_user_from_login(user_id: int) -> dict[str, Any]:
@@ -63,6 +61,7 @@ def fetch_user_from_login(user_id: int) -> dict[str, Any]:
     r.raise_for_status()
     return r.json()
 
+
 def safe_fetch_user_from_login(user_id: int) -> dict[str, Any]:
     try:
         return fetch_user_from_login(user_id)
@@ -70,56 +69,49 @@ def safe_fetch_user_from_login(user_id: int) -> dict[str, Any]:
     except CircuitBreakerError:
         raise HTTPException(
             status_code=503,
-            detail="Login service temporarily unavailable (circuit open)."
+            detail="Login service temporarily unavailable (circuit open).",
         )
 
     except httpx.RequestError:
         raise HTTPException(
             status_code=503,
-            detail="Signup/User service unavailable."
+            detail="Signup/User service unavailable.",
         )
 
     except httpx.HTTPStatusError:
         raise HTTPException(
             status_code=502,
-            detail="Signup/User service returned an error."
+            detail="Signup/User service returned an error.",
         )
 
-# def fetch_user_from_login(user_id: int) -> dict[str, Any]:
-#     url = f"{LOGIN_BASE_URL}/api/users/{user_id}"
-#     print("Calling Login URL:", url)
 
-#     try:
-#         with httpx.Client() as client:
-#             r = client.get(url, timeout=5.0)
-
-#         if r.status_code == 404:
-#             raise HTTPException(status_code=404, detail="User not found in Signup/User service.")
-
-#         r.raise_for_status()
-#         return r.json()
-        
-#     except CircuitBreakerError:
-#         raise HTTPException(status_code=503, detail="Login service temporarily unavailable (circuit open).")
-#     except httpx.RequestError:
-#         raise HTTPException(status_code=503, detail="Signup/User service unavailable.")
-#     except httpx.HTTPStatusError:
-#         raise HTTPException(status_code=502, detail="Signup/User service returned an error.")
-    
 def money(x: Decimal) -> Decimal:
     return Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
+
 def get_by_number(db: Session, account_number: str) -> AccountDB:
-    row = db.query(AccountDB).filter(AccountDB.account_number == account_number).first()
+    row = (
+        db.query(AccountDB)
+        .filter(AccountDB.account_number == account_number)
+        .filter(AccountDB.is_active.is_(True))
+        .first()
+    )
     if not row:
-        raise HTTPException(status_code=404, detail="Account number not found.")
+        raise HTTPException(status_code=404, detail="Active account number not found.")
     return row
 
+
 def get_by_user_id(db: Session, user_id: int) -> AccountDB:
-    row = db.query(AccountDB).filter(AccountDB.user_id == user_id).first()
+    row = (
+        db.query(AccountDB)
+        .filter(AccountDB.user_id == user_id)
+        .filter(AccountDB.is_active.is_(True))
+        .first()
+    )
     if not row:
-        raise HTTPException(status_code=404, detail="Account for this user not found.")
+        raise HTTPException(status_code=404, detail="Active account for this user not found.")
     return row
+
 
 def generate_account_number() -> str:
     letters = "".join(random.choice(string.ascii_uppercase) for _ in range(2))
@@ -132,42 +124,54 @@ def generate_account_number() -> str:
 def health():
     return {"status": "ok"}
 
+
 @app.get("/api/proxy-user/{user_id}")
 def proxy_user(user_id: int):
     user = safe_fetch_user_from_login(user_id)
     return {"account_service": True, "login_user": user}
 
 
-# ---------- accounts (ONLY from user_id) ----------
+# ---------- accounts ----------
 
 @app.post("/accounts/from-user/{user_id}", response_model=AccountRead, status_code=status.HTTP_201_CREATED)
 def create_account_from_user(user_id: int, db: Session = Depends(get_db)):
-    # 1) confirm user exists + grab their details
+    # confirming user exists + grabing their details
     user = safe_fetch_user_from_login(user_id)
 
-    # 2) prevent duplicates (one user -> one account)
-    existing = db.query(AccountDB).filter(AccountDB.user_id == user_id).first()
-    if existing:
+    # preventing duplicates 
+    existing_active = (
+        db.query(AccountDB)
+        .filter(AccountDB.user_id == user_id)
+        .filter(AccountDB.is_active.is_(True))
+        .first()
+    )
+    if existing_active:
         raise HTTPException(status_code=409, detail="Account already exists for this user.")
 
-    # 3) create account (account_name derived from user full_name)
+    # create account 
     row = AccountDB(
         user_id=user_id,
         account_number=generate_account_number(),
         account_name=user.get("full_name", f"User {user_id}"),
         balance=Decimal("0.00"),
         currency="EUR",
+        is_active=True,  
     )
+
     try:
-        db.add(row); db.commit(); db.refresh(row)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
         return row
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="Could not create account (conflict).")
 
+
 @app.get("/accounts/by-user/{user_id}", response_model=AccountRead)
 def get_account_by_user(user_id: int, db: Session = Depends(get_db)):
     return get_by_user_id(db, user_id)
+
 
 @app.get("/accounts/by-user/{user_id}/details")
 def get_account_details(user_id: int, db: Session = Depends(get_db)):
@@ -183,21 +187,27 @@ def get_account_details(user_id: int, db: Session = Depends(get_db)):
             "balance": str(acct.balance),
             "currency": acct.currency,
             "created_at": acct.created_at,
+            "is_active": acct.is_active,
         },
         "user": user,
     }
 
-@app.delete("/accounts/by-user/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+
+@app.delete("/accounts/by-user/{user_id}", status_code=204)
 def delete_account_by_user(user_id: int, db: Session = Depends(get_db)):
     row = db.query(AccountDB).filter(AccountDB.user_id == user_id).first()
     if not row:
-        # idempotent (nice for service-to-service deletes)
         return
-    db.delete(row)
+
+    if row.is_active is False:
+        return
+
+    row.is_active = False
     db.commit()
     return
 
-# ---------- transactions (KEEP as-is) ----------
+
+# ---------- transactions ----------
 
 @app.post("/accounts/by-number/{account_number}/deposit",
           response_model=TransactionRead, status_code=status.HTTP_201_CREATED)
@@ -229,8 +239,9 @@ def deposit(account_number: str, data: DepositCreate, db: Session = Depends(get_
         account_number=receiver.account_number,
         account_name=receiver.account_name,
         amount=amt,
-    ) 
+    )
     return tx
+
 
 @app.post("/accounts/by-number/{account_number}/withdraw",
           response_model=TransactionRead, status_code=status.HTTP_201_CREATED)
@@ -267,6 +278,7 @@ def withdraw(account_number: str, data: WithdrawCreate, db: Session = Depends(ge
     )
 
     return tx
+
 
 @app.post("/accounts/by-number/{account_number}/transfer",
           response_model=list[TransactionRead], status_code=status.HTTP_201_CREATED)
@@ -315,7 +327,6 @@ def transfer(account_number: str, data: TransferCreate, db: Session = Depends(ge
     db.refresh(out_tx)
     db.refresh(in_tx)
 
-    # Event for sender (money leaving)
     publish_transaction_event(
         event_type="transfer_out",
         transaction_id=out_tx.id,
@@ -327,7 +338,6 @@ def transfer(account_number: str, data: TransferCreate, db: Session = Depends(ge
         amount=amt,
     )
 
-    # Event for receiver (money arriving)
     publish_transaction_event(
         event_type="transfer_in",
         transaction_id=in_tx.id,
@@ -341,6 +351,7 @@ def transfer(account_number: str, data: TransferCreate, db: Session = Depends(ge
 
     return [out_tx, in_tx]
 
+
 @app.get("/accounts/by-number/{account_number}/transactions", response_model=list[TransactionRead])
 def list_transactions_for_number(account_number: str, db: Session = Depends(get_db)):
     acct = get_by_number(db, account_number)
@@ -351,6 +362,7 @@ def list_transactions_for_number(account_number: str, db: Session = Depends(get_
         .all()
     )
 
+
 @app.get("/transactions", response_model=list[TransactionRead])
 def list_transactions(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
     limit = max(1, min(limit, 200))
@@ -359,4 +371,3 @@ def list_transactions(limit: int = 50, offset: int = 0, db: Session = Depends(ge
         .order_by(TransactionDB.created_at.desc(), TransactionDB.id.desc())
         .offset(offset).limit(limit).all()
     )
-
