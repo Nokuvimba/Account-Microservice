@@ -1,6 +1,7 @@
 # tests/conftest.py
 
 import pytest
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from sqlalchemy import create_engine, event
@@ -31,6 +32,12 @@ def _schema():
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
+
+@pytest.fixture(autouse=True)
+def mock_publisher():
+    """Mock the publisher to avoid RabbitMQ connection issues in tests"""
+    with patch('app.main.publish_transaction_event') as mock:
+        yield mock
 
 @pytest.fixture
 def client():
